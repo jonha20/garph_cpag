@@ -16,7 +16,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,  
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,18 +120,18 @@ def ataques_por_pais():
     conn = get_db_connection()
     cur = conn.cursor()
 
-    # usamos "codigo_pais" porque en tus tablas no hay "pais"
     cur.execute("""
-        SELECT codigo_pais, COUNT(*) 
+        SELECT country, COUNT(*)
         FROM (
-            SELECT codigo_pais FROM public.alertas_fuerza_bruta
+            SELECT codigo_pais AS country FROM public.alertas_fuerza_bruta WHERE codigo_pais IS NOT NULL
             UNION ALL
-            SELECT codigo_pais FROM public.alertas_dos
+            SELECT codigo_pais FROM public.alertas_dos WHERE codigo_pais IS NOT NULL
             UNION ALL
-            SELECT codigo_pais FROM public.alertas_ddos
+            SELECT codigo_pais FROM public.alertas_ddos WHERE codigo_pais IS NOT NULL
+            UNION ALL
+            SELECT pais FROM public.alertas_login_sospechoso WHERE pais IS NOT NULL
         ) p
-        WHERE codigo_pais IS NOT NULL
-        GROUP BY codigo_pais
+        GROUP BY country
         ORDER BY COUNT(*) DESC;
     """)
     rows = cur.fetchall()
@@ -141,7 +141,6 @@ def ataques_por_pais():
     return [{"country": r[0], "count": r[1]} for r in rows]
 
 
-# ⚡ KPIs principales
 # ⚡ KPIs principales
 @app.get("/kpis")
 def kpis():
@@ -164,27 +163,36 @@ def kpis():
     """)
     total_alertas = cur.fetchone()[0]
 
-    # Últimas 24 horas
+    # Últimas 24 horas (reales)
     cur.execute("""
         SELECT COUNT(*) FROM (
-            SELECT fecha FROM public.alertas_phishing WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
+            SELECT fecha, hora FROM public.alertas_phishing
             UNION ALL
-            SELECT fecha FROM public.alertas_fuerza_bruta WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
+            SELECT fecha, hora FROM public.alertas_fuerza_bruta
             UNION ALL
-            SELECT fecha FROM public.alertas_dos WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
+            SELECT fecha, hora FROM public.alertas_dos
             UNION ALL
-            SELECT fecha FROM public.alertas_ddos WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
+            SELECT fecha, hora FROM public.alertas_ddos
             UNION ALL
-            SELECT fecha FROM public.alertas_login_sospechoso WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
-        ) AS ultimas;
+            SELECT fecha, hora FROM public.alertas_login_sospechoso
+        ) a
+        WHERE (CAST(fecha AS timestamp) + hora) >= NOW() - INTERVAL '24 hours';
     """)
     ultimas_24h = cur.fetchone()[0]
 
-    # Media de severidad (campo riesgo → cast a numeric si es texto)
+    # Media de severidad → solo palabra
     cur.execute("""
-        SELECT AVG(r::numeric) 
+        SELECT AVG(
+          CASE 
+            WHEN UPPER(riesgo) = 'BAJO' THEN 1
+            WHEN UPPER(riesgo) = 'MEDIO' THEN 2
+            WHEN UPPER(riesgo) = 'ALTO' THEN 3
+            WHEN UPPER(riesgo) IN ('CRÍTICO','CRITICO','CRÍTICA','CRITICA') THEN 4
+            ELSE NULL
+          END
+        )
         FROM (
-            SELECT riesgo AS r FROM public.alertas_phishing
+            SELECT riesgo FROM public.alertas_phishing
             UNION ALL
             SELECT riesgo FROM public.alertas_fuerza_bruta
             UNION ALL
@@ -193,10 +201,18 @@ def kpis():
             SELECT riesgo FROM public.alertas_ddos
             UNION ALL
             SELECT riesgo FROM public.alertas_login_sospechoso
-        ) AS riesgos
-        WHERE r ~ '^[0-9]+(\.[0-9]+)?$';
+        ) AS riesgos;
     """)
     media_riesgo = cur.fetchone()[0] or 0
+
+    if media_riesgo < 1.5:
+        nivel_riesgo = "BAJO"
+    elif media_riesgo < 2.5:
+        nivel_riesgo = "MEDIO"
+    elif media_riesgo < 3.5:
+        nivel_riesgo = "ALTO"
+    else:
+        nivel_riesgo = "CRÍTICO"
 
     # Clientes afectados
     cur.execute("""
@@ -220,11 +236,13 @@ def kpis():
     return {
         "total_alertas": total_alertas,
         "ultimas_24h": ultimas_24h,
-        "media_riesgo": round(float(media_riesgo), 2),
+        "nivel_riesgo": nivel_riesgo,   
         "clientes_afectados": clientes_afectados,
-        "tiempo_resolucion": "3h 45m"   # 👈 mock fijo por ahora
+        
     }
-# 📊 Ataques últimos 7 días
+
+
+# 📊 Ataques últimos 7 días (reales)
 @app.get("/ataques-ultimos-7-dias")
 def ataques_ultimos_7_dias():
     conn = get_db_connection()
@@ -233,17 +251,17 @@ def ataques_ultimos_7_dias():
     cur.execute("""
         SELECT fecha, COUNT(*) 
         FROM (
-            SELECT fecha FROM public.alertas_phishing
+            SELECT fecha, hora FROM public.alertas_phishing
             UNION ALL
-            SELECT fecha FROM public.alertas_fuerza_bruta
+            SELECT fecha, hora FROM public.alertas_fuerza_bruta
             UNION ALL
-            SELECT fecha FROM public.alertas_dos
+            SELECT fecha, hora FROM public.alertas_dos
             UNION ALL
-            SELECT fecha FROM public.alertas_ddos
+            SELECT fecha, hora FROM public.alertas_ddos
             UNION ALL
-            SELECT fecha FROM public.alertas_login_sospechoso
-        ) AS todas
-        WHERE fecha >= CURRENT_DATE - INTERVAL '7 days'
+            SELECT fecha, hora FROM public.alertas_login_sospechoso
+        ) a
+        WHERE (CAST(fecha AS timestamp) + hora) >= NOW() - INTERVAL '7 days'
         GROUP BY fecha
         ORDER BY fecha;
     """)
@@ -255,7 +273,7 @@ def ataques_ultimos_7_dias():
     return [{"fecha": str(r[0]), "total": r[1]} for r in rows]
 
 
-# ⏱️ Ataques últimas 24h
+# ⏱️ Ataques últimas 24h (reales por hora)
 @app.get("/ataques-ultimas-24h")
 def ataques_ultimas_24h():
     conn = get_db_connection()
@@ -264,17 +282,17 @@ def ataques_ultimas_24h():
     cur.execute("""
         SELECT h, COUNT(*) 
         FROM (
-            SELECT EXTRACT(HOUR FROM hora) AS h, fecha FROM public.alertas_phishing
+            SELECT EXTRACT(HOUR FROM hora) AS h, fecha, hora FROM public.alertas_phishing
             UNION ALL
-            SELECT EXTRACT(HOUR FROM hora), fecha FROM public.alertas_fuerza_bruta
+            SELECT EXTRACT(HOUR FROM hora), fecha, hora FROM public.alertas_fuerza_bruta
             UNION ALL
-            SELECT EXTRACT(HOUR FROM hora), fecha FROM public.alertas_dos
+            SELECT EXTRACT(HOUR FROM hora), fecha, hora FROM public.alertas_dos
             UNION ALL
-            SELECT EXTRACT(HOUR FROM hora), fecha FROM public.alertas_ddos
+            SELECT EXTRACT(HOUR FROM hora), fecha, hora FROM public.alertas_ddos
             UNION ALL
-            SELECT EXTRACT(HOUR FROM hora), fecha FROM public.alertas_login_sospechoso
-        ) AS horas
-        WHERE fecha >= CURRENT_DATE - INTERVAL '1 day'
+            SELECT EXTRACT(HOUR FROM hora), fecha, hora FROM public.alertas_login_sospechoso
+        ) a
+        WHERE (CAST(fecha AS timestamp) + hora) >= NOW() - INTERVAL '24 hours'
         GROUP BY h
         ORDER BY h;
     """)
